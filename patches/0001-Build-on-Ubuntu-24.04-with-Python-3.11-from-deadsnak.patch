@@ -1,0 +1,233 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ruben Andersen <sterion@sterion.dk>
+Date: Thu, 22 Oct 2026 01:18:36 +0200
+Subject: [PATCH] Build on Ubuntu 24.04 with Python 3.11 from deadsnakes
+
+Frigate's wheels are cp311-only and Ubuntu 24.04 ships 3.12, so 3.11 comes
+from the deadsnakes PPA. The Debian-only steps (non-free components edit,
+trixie backports, deb-src via debian.sources) get their Ubuntu equivalents.
+pip runs with --ignore-installed because apt-installed Python modules on the
+3.11 path cannot be uninstalled by pip.
+
+PPAs are read from a dated Launchpad snapshot so rebuilds are reproducible.
+---
+ docker/main/Dockerfile          | 23 ++++++++++++++++-------
+ docker/main/build_nginx.sh      |  2 ++
+ docker/main/build_sqlite_vec.sh |  2 ++
+ docker/main/install_deps.sh     | 32 +++++++++-----------------------
+ docker/main/install_ppa.sh      | 28 ++++++++++++++++++++++++++++
+ 5 files changed, 57 insertions(+), 30 deletions(-)
+ create mode 100755 docker/main/install_ppa.sh
+
+diff --git a/docker/main/Dockerfile b/docker/main/Dockerfile
+index bf17146..594f426 100644
+--- a/docker/main/Dockerfile
++++ b/docker/main/Dockerfile
+@@ -6,8 +6,11 @@ ARG DEBIAN_FRONTEND=noninteractive
+ # Globally set pip break-system-packages option to avoid having to specify it every time
+ ARG PIP_BREAK_SYSTEM_PACKAGES=1
+ 
+-ARG BASE_IMAGE=debian:12
+-ARG SLIM_BASE=debian:12-slim
++ARG BASE_IMAGE=ubuntu:24.04
++ARG SLIM_BASE=ubuntu:24.04
++
++# Launchpad PPAs are read as they were at this moment
++ARG PPA_SNAPSHOT=20261020T000000Z
+ 
+ # A hook that allows us to inject commands right after the base images
+ ARG BASE_HOOK=
+@@ -157,15 +160,19 @@ FROM base AS wheels
+ ARG DEBIAN_FRONTEND
+ ARG TARGETARCH
+ ARG DEBUG=false
++ARG PPA_SNAPSHOT
+ 
+ # Use a separate container to build wheels to prevent build dependencies in final image
+-RUN apt-get -qq update \
++RUN --mount=type=bind,source=docker/main/install_ppa.sh,target=/deps/install_ppa.sh \
++    apt-get -qq update \
+     && apt-get -qq install -y \
+-    apt-transport-https wget unzip \
++    apt-transport-https wget unzip gnupg ca-certificates \
++    && /deps/install_ppa.sh deadsnakes/ppa F23C5A6CF475977595C89F51BA6932366A755776 \
+     && apt-get -qq update \
+     && apt-get -qq install -y \
+     python3.11 \
+     python3.11-dev \
++    python3.11-distutils \
+     # opencv dependencies
+     build-essential cmake git pkg-config libgtk-3-dev \
+     libavcodec-dev libavformat-dev libswscale-dev libv4l-dev \
+@@ -183,7 +190,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+ 
+ RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
+     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
+-    && python3 get-pip.py "pip"
++    && python3 get-pip.py "pip" --ignore-installed
+ 
+ COPY docker/main/requirements.txt /requirements.txt
+ COPY docker/main/requirements-dev.txt /requirements-dev.txt
+@@ -222,6 +229,7 @@ COPY docker/main/rootfs/ /
+ FROM slim-base AS deps
+ ARG TARGETARCH
+ ARG BASE_IMAGE
++ARG PPA_SNAPSHOT
+ 
+ ARG DEBIAN_FRONTEND
+ # http://stackoverflow.com/questions/48162574/ddg#49462622
+@@ -263,6 +271,7 @@ ENV PATH="/usr/local/go2rtc/bin:/usr/local/tempio/bin:/usr/local/nginx/sbin:${PA
+ 
+ # Install dependencies
+ RUN --mount=type=bind,source=docker/main/install_deps.sh,target=/deps/install_deps.sh \
++    --mount=type=bind,source=docker/main/install_ppa.sh,target=/deps/install_ppa.sh \
+     /deps/install_deps.sh
+ 
+ ENV DEFAULT_FFMPEG_VERSION="8.0"
+@@ -270,10 +279,10 @@ ENV INCLUDED_FFMPEG_VERSIONS="${DEFAULT_FFMPEG_VERSION}:7.0:5.0"
+ 
+ RUN wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py \
+     && sed -i 's/args.append("setuptools")/args.append("setuptools==77.0.3")/' get-pip.py \
+-    && python3 get-pip.py "pip"
++    && python3 get-pip.py "pip" --ignore-installed
+ 
+ RUN --mount=type=bind,from=wheels,source=/wheels,target=/deps/wheels \
+-    pip3 install -U /deps/wheels/*.whl
++    pip3 install -U --ignore-installed /deps/wheels/*.whl
+ 
+ # Install Axera Engine
+ RUN pip3 install https://github.com/AXERA-TECH/pyaxengine/releases/download/0.1.3-frigate/axengine-0.1.3-py3-none-any.whl
+diff --git a/docker/main/build_nginx.sh b/docker/main/build_nginx.sh
+index 708a4cb..04c174a 100755
+--- a/docker/main/build_nginx.sh
++++ b/docker/main/build_nginx.sh
+@@ -12,6 +12,8 @@ source /etc/os-release
+ 
+ if [[ "$VERSION_ID" == "12" ]]; then
+     sed -i '/^Types:/s/deb/& deb-src/' /etc/apt/sources.list.d/debian.sources
++elif [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
++    sed -i '/^Types:/s/deb/& deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+ else
+     cp /etc/apt/sources.list /etc/apt/sources.list.d/sources-src.list
+     sed -i 's|deb http|deb-src http|g' /etc/apt/sources.list.d/sources-src.list
+diff --git a/docker/main/build_sqlite_vec.sh b/docker/main/build_sqlite_vec.sh
+index 8036c6f..fb869c1 100755
+--- a/docker/main/build_sqlite_vec.sh
++++ b/docker/main/build_sqlite_vec.sh
+@@ -8,6 +8,8 @@ source /etc/os-release
+ 
+ if [[ "$VERSION_ID" == "12" ]]; then
+     sed -i '/^Types:/s/deb/& deb-src/' /etc/apt/sources.list.d/debian.sources
++elif [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
++    sed -i '/^Types:/s/deb/& deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+ else
+     cp /etc/apt/sources.list /etc/apt/sources.list.d/sources-src.list
+     sed -i 's|deb http|deb-src http|g' /etc/apt/sources.list.d/sources-src.list
+diff --git a/docker/main/install_deps.sh b/docker/main/install_deps.sh
+index e197ce1..1d300fa 100755
+--- a/docker/main/install_deps.sh
++++ b/docker/main/install_deps.sh
+@@ -12,7 +12,6 @@ apt-get -qq install --no-install-recommends -y \
+     lbzip2 \
+     procps vainfo \
+     unzip locales tzdata libxml2 xz-utils \
+-    python3.11 \
+     curl \
+     lsof \
+     jq \
+@@ -23,7 +22,10 @@ apt-get -qq install --no-install-recommends -y \
+     python3-h2 \
+     libgomp1  # memryx detector
+ 
+-update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
++# Frigate's wheels are built for Python 3.11, Ubuntu 24.04 ships 3.12
++/deps/install_ppa.sh deadsnakes/ppa F23C5A6CF475977595C89F51BA6932366A755776
++apt-get -qq update
++apt-get -qq install --no-install-recommends -y python3.11 python3.11-distutils
+ 
+ mkdir -p -m 600 /root/.gnupg
+ 
+@@ -80,11 +82,7 @@ fi
+ # arch specific packages
+ if [[ "${TARGETARCH}" == "amd64" ]]; then
+   # Install non-free version of i965 driver
+-  sed -i -E "/^Components: main$/s/main/main contrib non-free non-free-firmware/" "/etc/apt/sources.list.d/debian.sources" \
+-      && apt-get -qq update \
+-      && apt-get install --no-install-recommends --no-install-suggests -y i965-va-driver-shaders \
+-      && sed -i -E "/^Components: main contrib non-free non-free-firmware$/s/main contrib non-free non-free-firmware/main/" "/etc/apt/sources.list.d/debian.sources" \
+-      && apt-get update
++  apt-get install --no-install-recommends --no-install-suggests -y i965-va-driver-shaders
+ 
+     # install amd / intel-i965 driver packages
+     apt-get -qq install --no-install-recommends --no-install-suggests -y \
+@@ -95,25 +93,10 @@ if [[ "${TARGETARCH}" == "amd64" ]]; then
+     # intel packages use zst compression so we need to update dpkg
+     apt-get install -y dpkg
+ 
+-    # use intel apt repo for libmfx1 (legacy QSV, pre-Gen12)
+-    wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics.gpg
+-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy client" | tee /etc/apt/sources.list.d/intel-gpu-jammy.list
+-    apt-get -qq update
+-
+     # intel-media-va-driver-non-free is built from source in the
+     # intel-media-driver Dockerfile stage for Battlemage (Xe2) support
+     apt-get -qq install --no-install-recommends --no-install-suggests -y \
+-        libmfx1
+-    rm -f /usr/share/keyrings/intel-graphics.gpg
+-    rm -f /etc/apt/sources.list.d/intel-gpu-jammy.list
+-
+-    # upgrade libva2, oneVPL runtime, and libvpl2 from trixie for Battlemage support
+-    echo "deb http://deb.debian.org/debian trixie main" > /etc/apt/sources.list.d/trixie.list
+-    apt-get -qq update
+-    apt-get -qq install -y -t trixie libva2 libva-drm2 libzstd1
+-    apt-get -qq install -y -t trixie libmfx-gen1.2 libvpl2
+-    rm -f /etc/apt/sources.list.d/trixie.list
+-    apt-get -qq update
++        libmfx1 libva2 libva-drm2 libmfx-gen1.2 libvpl2
+     apt-get -qq install -y ocl-icd-libopencl1
+ 
+     # install libtbb12 for NPU support
+@@ -165,6 +148,9 @@ apt-get clean autoclean -y
+ apt-get autoremove --purge -y
+ rm -rf /var/lib/apt/lists/*
+ 
++# Only once apt is done: its own tooling needs Ubuntu's Python 3.12
++update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
++
+ # Install yq, for frigate-prepare and go2rtc echo source
+ curl -fsSL \
+     "https://github.com/mikefarah/yq/releases/download/v4.48.2/yq_linux_$(dpkg --print-architecture)" \
+diff --git a/docker/main/install_ppa.sh b/docker/main/install_ppa.sh
+new file mode 100755
+index 0000000..802ed36
+--- /dev/null
++++ b/docker/main/install_ppa.sh
+@@ -0,0 +1,28 @@
++#!/bin/bash
++
++# Usage: install_ppa.sh <owner/ppa> <signing key fingerprint>
++# With PPA_SNAPSHOT set (e.g. 20261020T000000Z) the PPA is read as it was then.
++
++set -euxo pipefail
++
++ppa=$1
++fingerprint=$2
++name=${ppa//\//-}
++
++source /etc/os-release
++
++if [[ -n "${PPA_SNAPSHOT:-}" ]]; then
++    url="https://snapshot.ppa.launchpadcontent.net/${ppa}/ubuntu/${PPA_SNAPSHOT}"
++else
++    url="https://ppa.launchpadcontent.net/${ppa}/ubuntu"
++fi
++
++wget -qO "/tmp/${name}.asc" "https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x${fingerprint}"
++if ! gpg --show-keys --with-colons "/tmp/${name}.asc" | grep -qx "fpr:::::::::${fingerprint}:"; then
++    echo "key for ${ppa} does not have fingerprint ${fingerprint}" >&2
++    exit 1
++fi
++gpg --dearmor < "/tmp/${name}.asc" > "/usr/share/keyrings/${name}.gpg"
++rm "/tmp/${name}.asc"
++
++echo "deb [signed-by=/usr/share/keyrings/${name}.gpg] ${url} ${VERSION_CODENAME} main" > "/etc/apt/sources.list.d/${name}.list"

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ruben Andersen <sterion@sterion.dk>
+Date: Thu, 22 Oct 2026 01:19:22 +0200
+Subject: [PATCH] Pin OpenVINO 2026.3.1
+
+The OpenVINO release Intel validates NPU driver 1.38 against. The model
+converter is pinned to the same version as the runtime.
+---
+ docker/main/requirements-ov.txt     | 2 +-
+ docker/main/requirements-wheels.txt | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/docker/main/requirements-ov.txt b/docker/main/requirements-ov.txt
+index 2df7890..c0dea74 100644
+--- a/docker/main/requirements-ov.txt
++++ b/docker/main/requirements-ov.txt
+@@ -1,2 +1,2 @@
+ numpy
+-openvino >= 2026.2.0
++openvino == 2026.3.1
+diff --git a/docker/main/requirements-wheels.txt b/docker/main/requirements-wheels.txt
+index 5ed9664..3878e86 100644
+--- a/docker/main/requirements-wheels.txt
++++ b/docker/main/requirements-wheels.txt
+@@ -42,7 +42,7 @@ opencv-python-headless == 4.11.0.*
+ opencv-contrib-python == 4.11.0.*
+ scipy == 1.16.*
+ # OpenVino & ONNX
+-openvino == 2025.4.*
++openvino == 2026.3.1
+ onnxruntime == 1.22.*
+ # Embeddings
+ transformers == 4.45.*

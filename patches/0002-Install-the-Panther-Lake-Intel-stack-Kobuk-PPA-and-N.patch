@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ruben Andersen <sterion@sterion.dk>
+Date: Thu, 22 Oct 2026 01:19:10 +0200
+Subject: [PATCH] Install the Panther Lake Intel stack: Kobuk PPA and NPU
+ driver 1.38
+
+The GPU compute runtime, media driver, oneVPL and Level Zero come from the
+Kobuk team PPA (compute 26.31, IGC 2.40, media 26.3, Level Zero 1.32), which
+is the GPU stack Intel validates NPU driver 1.38 against. Building the media
+driver from source was only needed on Debian 12's older glibc, so that stage
+goes. The pre-Gen12 legacy compute runtime is dropped with the GitHub debs.
+
+NPU driver 1.38 supports NPU50xx (Panther Lake); its firmware package is
+skipped because the host kernel loads the firmware.
+---
+ docker/main/Dockerfile                  |  9 -----
+ docker/main/build_intel_media_driver.sh | 48 ------------------------
+ docker/main/install_deps.sh             | 50 +++++++++----------------
+ 3 files changed, 17 insertions(+), 90 deletions(-)
+ delete mode 100755 docker/main/build_intel_media_driver.sh
+
+diff --git a/docker/main/Dockerfile b/docker/main/Dockerfile
+index 594f426..8f9ba84 100644
+--- a/docker/main/Dockerfile
++++ b/docker/main/Dockerfile
+@@ -55,14 +55,6 @@ RUN --mount=type=tmpfs,target=/tmp --mount=type=tmpfs,target=/var/cache/apt \
+     --mount=type=cache,target=/root/.ccache \
+     /deps/build_sqlite_vec.sh
+ 
+-# Build intel-media-driver from source against bookworm's system libva so it
+-# works with Debian 12's glibc/libstdc++ (pre-built noble/trixie packages
+-# require glibc 2.38 which is not available on bookworm).
+-FROM base AS intel-media-driver
+-ARG DEBIAN_FRONTEND
+-RUN --mount=type=bind,source=docker/main/build_intel_media_driver.sh,target=/deps/build_intel_media_driver.sh \
+-    /deps/build_intel_media_driver.sh
+-
+ FROM scratch AS go2rtc
+ ARG TARGETARCH
+ WORKDIR /rootfs/usr/local/go2rtc/bin
+@@ -215,7 +207,6 @@ RUN --mount=type=bind,source=docker/main/install_hailort.sh,target=/deps/install
+ FROM scratch AS deps-rootfs
+ COPY --from=nginx /usr/local/nginx/ /usr/local/nginx/
+ COPY --from=sqlite-vec /usr/local/lib/ /usr/local/lib/
+-COPY --from=intel-media-driver /rootfs/ /
+ COPY --from=go2rtc /rootfs/ /
+ COPY --from=libusb-build /usr/local/lib /usr/local/lib
+ COPY --from=tempio /rootfs/ /
+diff --git a/docker/main/build_intel_media_driver.sh b/docker/main/build_intel_media_driver.sh
+deleted file mode 100755
+index acc9caf..0000000
+--- a/docker/main/build_intel_media_driver.sh
++++ /dev/null
+@@ -1,48 +0,0 @@
+-#!/bin/bash
+-
+-set -euxo pipefail
+-
+-# Intel media driver is x86_64-only. Create empty rootfs on other arches so
+-# the downstream COPY --from has a valid source.
+-if [ "$(uname -m)" != "x86_64" ]; then
+-    mkdir -p /rootfs
+-    exit 0
+-fi
+-
+-MEDIA_DRIVER_VERSION="intel-media-25.2.6"
+-GMMLIB_VERSION="intel-gmmlib-22.7.2"
+-
+-apt-get -qq update
+-apt-get -qq install -y wget gnupg ca-certificates cmake g++ make pkg-config
+-
+-# Use Intel's jammy repo for newer libva-dev (2.22) which provides the
+-# VVC/VVC-decode headers required by media-driver 25.x
+-wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics.gpg
+-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy client" > /etc/apt/sources.list.d/intel-gpu-jammy.list
+-apt-get -qq update
+-apt-get -qq install -y libva-dev
+-
+-# Build gmmlib (required by media-driver)
+-wget -qO gmmlib.tar.gz "https://github.com/intel/gmmlib/archive/refs/tags/${GMMLIB_VERSION}.tar.gz"
+-mkdir /tmp/gmmlib
+-tar -xf gmmlib.tar.gz -C /tmp/gmmlib --strip-components 1
+-cmake -S /tmp/gmmlib -B /tmp/gmmlib/build -DCMAKE_BUILD_TYPE=Release
+-make -C /tmp/gmmlib/build -j"$(nproc)"
+-make -C /tmp/gmmlib/build install
+-
+-# Build intel-media-driver
+-wget -qO media-driver.tar.gz "https://github.com/intel/media-driver/archive/refs/tags/${MEDIA_DRIVER_VERSION}.tar.gz"
+-mkdir /tmp/media-driver
+-tar -xf media-driver.tar.gz -C /tmp/media-driver --strip-components 1
+-cmake -S /tmp/media-driver -B /tmp/media-driver/build \
+-    -DCMAKE_BUILD_TYPE=Release \
+-    -DENABLE_KERNELS=ON \
+-    -DENABLE_NONFREE_KERNELS=ON \
+-    -DCMAKE_INSTALL_PREFIX=/usr \
+-    -DCMAKE_INSTALL_LIBDIR=/usr/lib/x86_64-linux-gnu \
+-    -DCMAKE_C_FLAGS="-Wno-error" \
+-    -DCMAKE_CXX_FLAGS="-Wno-error"
+-make -C /tmp/media-driver/build -j"$(nproc)"
+-
+-# Install driver to rootfs for COPY --from
+-make -C /tmp/media-driver/build install DESTDIR=/rootfs
+diff --git a/docker/main/install_deps.sh b/docker/main/install_deps.sh
+index 1d300fa..3b65659 100755
+--- a/docker/main/install_deps.sh
++++ b/docker/main/install_deps.sh
+@@ -90,44 +90,28 @@ if [[ "${TARGETARCH}" == "amd64" ]]; then
+         libva-drm2 \
+         mesa-va-drivers radeontop
+ 
+-    # intel packages use zst compression so we need to update dpkg
+-    apt-get install -y dpkg
+-
+-    # intel-media-va-driver-non-free is built from source in the
+-    # intel-media-driver Dockerfile stage for Battlemage (Xe2) support
++    # media driver, VA-API, oneVPL, compute runtime and Level Zero, all from
++    # the Kobuk team PPA: the Intel graphics stack Panther Lake (Xe3) needs
++    /deps/install_ppa.sh kobuk-team/intel-graphics 0C0E6AF955CE463C03FC51574D098D70AFBE5E1F
++    apt-get -qq update
+     apt-get -qq install --no-install-recommends --no-install-suggests -y \
+-        libmfx1 libva2 libva-drm2 libmfx-gen1.2 libvpl2
+-    apt-get -qq install -y ocl-icd-libopencl1
++        intel-media-va-driver-non-free vainfo \
++        libmfx1 libva2 libva-drm2 libmfx-gen1.2 libvpl2 \
++        ocl-icd-libopencl1 intel-opencl-icd libze-intel-gpu1 libze1
+ 
+     # install libtbb12 for NPU support
+     apt-get -qq install -y libtbb12
+ 
+-    # install legacy and standard intel compute packages
+-    # see https://github.com/intel/compute-runtime/blob/master/LEGACY_PLATFORMS.md for more info
+-    # needed core package
+-    wget https://github.com/intel/compute-runtime/releases/download/26.14.37833.4/libigdgmm12_22.9.0_amd64.deb
+-    dpkg -i libigdgmm12_22.9.0_amd64.deb
+-    rm libigdgmm12_22.9.0_amd64.deb
+-
+-    # legacy compute-runtime packages
+-    wget https://github.com/intel/compute-runtime/releases/download/24.35.30872.36/intel-opencl-icd-legacy1_24.35.30872.36_amd64.deb
+-    wget https://github.com/intel/compute-runtime/releases/download/24.35.30872.36/intel-level-zero-gpu-legacy1_1.5.30872.36_amd64.deb
+-    wget https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.17537.24/intel-igc-opencl_1.0.17537.24_amd64.deb
+-    wget https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.17537.24/intel-igc-core_1.0.17537.24_amd64.deb
+-    # standard compute-runtime packages
+-    wget https://github.com/intel/compute-runtime/releases/download/26.14.37833.4/intel-opencl-icd_26.14.37833.4-0_amd64.deb
+-    wget https://github.com/intel/compute-runtime/releases/download/26.14.37833.4/libze-intel-gpu1_26.14.37833.4-0_amd64.deb
+-    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.32.7/intel-igc-opencl-2_2.32.7+21184_amd64.deb
+-    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.32.7/intel-igc-core-2_2.32.7+21184_amd64.deb
+-    # npu packages
+-    wget https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero_1.28.2+u22.04_amd64.deb
+-    wget https://github.com/intel/linux-npu-driver/releases/download/v1.19.0/intel-driver-compiler-npu_1.19.0.20250707-16111289554_ubuntu22.04_amd64.deb
+-    wget https://github.com/intel/linux-npu-driver/releases/download/v1.19.0/intel-fw-npu_1.19.0.20250707-16111289554_ubuntu22.04_amd64.deb
+-    wget https://github.com/intel/linux-npu-driver/releases/download/v1.19.0/intel-level-zero-npu_1.19.0.20250707-16111289554_ubuntu22.04_amd64.deb
+-
+-    dpkg -i *.deb
+-    rm *.deb
+-    apt-get -qq install -f -y
++    # NPU userspace (Level Zero driver and compiler). intel-fw-npu is left out:
++    # the host kernel loads the NPU firmware, not the container.
++    NPU_DRIVER_URL="https://github.com/intel/linux-npu-driver/releases/download/v1.38.0/linux-npu-driver-v1.38.0.20260910-34487311128-ubuntu2404.tar.gz"
++    NPU_DRIVER_SHA256="1efcd4b60c22abee751d8f2705962cbcc2a569de45c7e0e670cf08afbfcdc1d2"
++    mkdir /tmp/npu
++    wget -qO /tmp/npu/driver.tar.gz "${NPU_DRIVER_URL}"
++    echo "${NPU_DRIVER_SHA256}  /tmp/npu/driver.tar.gz" | sha256sum -c -
++    tar -xzf /tmp/npu/driver.tar.gz -C /tmp/npu
++    dpkg -i /tmp/npu/intel-driver-compiler-npu_*.deb /tmp/npu/intel-level-zero-npu_*.deb
++    rm -rf /tmp/npu
+ 
+     # Battlemage uses the xe kernel driver, but the VA-API driver is still iHD.
+     # The oneVPL runtime may look for a driver named after the kernel module.

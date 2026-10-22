@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Check that the Intel GPU, NPU and VA-API stack in this image can use the hardware.
+
+verify-frigate-intel              compile and run a model on GPU and NPU, probe VA-API
+verify-frigate-intel --static     only check the userspace is installed (no devices needed)
+"""
+
+import argparse
+import ctypes
+import glob
+import os
+import subprocess
+import sys
+
+import numpy as np
+import openvino as ov
+from openvino import properties
+
+LIBRARIES = [
+    "libze_loader.so.1",
+    "libze_intel_gpu.so.1",
+    "libze_intel_npu.so.1",
+    "libopenvino_intel_npu_compiler.so",
+    "libOpenCL.so.1",
+    "libva.so.2",
+    "libvpl.so.2",
+]
+VA_DRIVER = "/usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so"
+OV_PLUGINS = ["CPU", "GPU", "NPU"]
+
+failures = []
+
+
+def check(ok, message):
+    print(f"  [{'ok' if ok else 'FAIL'}] {message}")
+    if not ok:
+        failures.append(message)
+
+
+def static_checks(model_path):
+    print(f"OpenVINO {ov.__version__}")
+    check(os.path.exists(model_path), model_path)
+    for library in LIBRARIES:
+        try:
+            ctypes.CDLL(library)
+            check(True, library)
+        except OSError as error:
+            check(False, f"{library}: {error}")
+    check(os.path.exists(VA_DRIVER), VA_DRIVER)
+    core = ov.Core()
+    for device in OV_PLUGINS:
+        try:
+            core.get_versions(device)
+            check(True, f"OpenVINO {device} plugin loads")
+        except RuntimeError as error:
+            check(False, f"OpenVINO {device} plugin: {error}")
+
+
+def run_model(core, device, model_path):
+    model = core.read_model(model_path)
+    compiled = core.compile_model(model, device)
+    request = compiled.create_infer_request()
+    for model_input in compiled.inputs:
+        request.set_tensor(model_input, ov.Tensor(np.zeros(model_input.shape, dtype=model_input.element_type.to_dtype())))
+    request.infer()
+    # The NPU plugin reports a single string where GPU and CPU report a list
+    executed = compiled.get_property(properties.execution_devices)
+    return [executed] if isinstance(executed, str) else executed
+
+
+def device_checks(devices, model_path):
+    core = ov.Core()
+    available = core.available_devices
+    print(f"OpenVINO {ov.__version__}, devices: {available}")
+    for device in devices:
+        if device not in available:
+            check(False, f"{device} not visible to OpenVINO")
+            continue
+        try:
+            name = core.get_property(device, properties.device.full_name)
+            executed = run_model(core, device, model_path)
+            check(any(e.startswith(device) for e in executed), f"{device} ({name}) ran inference on {executed}")
+        except RuntimeError as error:
+            check(False, f"{device}: {error}")
+
+    render_nodes = sorted(glob.glob("/dev/dri/renderD*"))
+    check(bool(render_nodes), f"render nodes: {render_nodes}")
+    for node in render_nodes:
+        result = subprocess.run(["vainfo", "--display", "drm", "--device", node], capture_output=True, text=True)
+        driver = next((line.split(":", 1)[1].strip() for line in result.stdout.splitlines() if "Driver version" in line), "")
+        decode = [codec for codec in ("H264", "HEVC") if any(line.startswith(f"      VAProfile{codec}") and "VAEntrypointVLD" in line for line in result.stdout.splitlines())]
+        check(result.returncode == 0 and bool(decode), f"VA-API on {node}: {driver or result.stderr.strip()} decode={decode}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--static", action="store_true", help="check installed userspace only")
+    parser.add_argument("--device", action="append", choices=["GPU", "NPU"], help="device to test (default: both)")
+    parser.add_argument("--model", default="/openvino-model/ssdlite_mobilenet_v2.xml", help="model with static input shapes")
+    args = parser.parse_args()
+
+    if args.static:
+        static_checks(args.model)
+    else:
+        device_checks(args.device or ["GPU", "NPU"], args.model)
+
+    if failures:
+        print(f"\n{len(failures)} check(s) failed", file=sys.stderr)
+        return 1
+    print("\nall checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
