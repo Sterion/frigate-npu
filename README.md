@@ -8,6 +8,11 @@ Frigate itself is unchanged. Its Docker build is changed by three small patches 
 [`patches/`](patches), applied to a pinned upstream commit, so the whole difference
 from stock Frigate fits on a screen.
 
+> This build stands on the work of [@timothystewart6](https://github.com/timothystewart6)
+> in [frigate-intel-npu](https://github.com/timothystewart6/frigate-intel-npu), which
+> worked out why Frigate could not use the Panther Lake NPU and GPU, and how to fix it,
+> for Frigate 0.17.2. See [Credits](#credits).
+
 | | Upstream 0.18.2 | This build |
 |---|---|---|
 | Base | Debian 12 | Ubuntu 24.04, Python 3.11 from deadsnakes |
@@ -27,9 +32,9 @@ against; it is only published for Ubuntu, which is why the base changes.
   NPU device plugins.
 - Two cameras at 5 fps detect, VA-API decode, YOLOv9 on the NPU.
 
-[frigate-intel-npu](https://github.com/timothystewart6/frigate-intel-npu) did the
-same for Frigate 0.17.2 on bare metal with the same CPU, and its measurements and
-findings were the starting point for this build.
+[frigate-intel-npu](https://github.com/timothystewart6/frigate-intel-npu) has
+bare-metal results on the same CPU for Frigate 0.17.2, including wall-power
+measurements for CPU, GPU and NPU detection.
 
 ## Image
 
@@ -195,6 +200,26 @@ git -C work format-patch -N --zero-commit --no-signature -o ../patches <FRIGATE_
 The pins that live in the patches: `PPA_SNAPSHOT` (Dockerfile), the NPU driver URL
 and SHA-256 (`install_deps.sh`) and OpenVINO (`requirements-wheels.txt`,
 `requirements-ov.txt`).
+
+## Credits
+
+[@timothystewart6](https://github.com/timothystewart6)'s
+[frigate-intel-npu](https://github.com/timothystewart6/frigate-intel-npu) did the hard
+part for Frigate 0.17.2:
+
+- found that Frigate already supports the NPU, and that what stood in the way was the
+  Intel userspace bundled in its image, too old for Panther Lake;
+- rebuilt Frigate on Ubuntu 24.04 with Python 3.11 from deadsnakes, the approach the
+  first patch here follows;
+- replaced the GPU compute runtime and media driver with the Kobuk PPA builds, which
+  made OpenVINO `GPU` and VA-API decode work on the Xe3 iGPU;
+- proved the NPU really runs the model, and measured CPU, GPU and NPU detection in a
+  real Frigate setup, down to the wall power.
+
+This repository carries that work forward to Frigate 0.18.2 as a patch series, with
+newer NPU, GPU and OpenVINO releases.
+
+[Frigate](https://github.com/blakeblackshear/frigate) is the NVR all of this runs on.
 
 ## License
 
