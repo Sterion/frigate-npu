@@ -223,6 +223,10 @@ newer NPU, GPU and OpenVINO releases.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). Frigate is MIT licensed by Frigate, Inc. Intel's
-drivers, OpenVINO and the other packages installed into the image keep their own
-licenses.
+MIT; see [LICENSE](LICENSE).
+
+The patches modify Frigate's Docker build files, which are Copyright (c) 2026
+Frigate, Inc. (Frigate™) and released under the
+[MIT License](https://github.com/blakeblackshear/frigate/blob/dev/LICENSE); that
+notice applies to those files too. Intel's drivers, OpenVINO and the other packages
+installed into the image keep their own licenses.
