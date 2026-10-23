@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ruben Andersen <sterion@sterion.dk>
+Date: Fri, 23 Oct 2026 19:11:12 +0200
+Subject: [PATCH] Make NPU turbo switchable with FRIGATE_NPU_TURBO
+
+Frigate sets NPU_TURBO for detection models on the NPU. OpenVINO passes it to
+the driver as a turbo command queue, and linux-npu-driver then busy-waits
+with UMONITOR/UMWAIT (up to 15 ms) on every job instead of sleeping in the
+kernel wait. The calling thread is on a CPU core for the whole inference.
+
+Measured on a Core Ultra 9 386H NPU with YOLOv9-m 512 at Frigate's pace,
+turning turbo off takes the CPU during inference from 100% to ~14% and adds
+~1-2 ms per inference; the NPU's clock and compute time are unchanged.
+
+Turbo stays the default, as upstream has it; FRIGATE_NPU_TURBO=false turns
+it off.
+---
+ frigate/detectors/detection_runners.py | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/frigate/detectors/detection_runners.py b/frigate/detectors/detection_runners.py
+index 7cdd4a0..daee55e 100644
+--- a/frigate/detectors/detection_runners.py
++++ b/frigate/detectors/detection_runners.py
+@@ -332,10 +332,16 @@ class OpenVINOModelRunner(BaseModelRunner):
+                 logger.debug(f"GPU_QUEUE_THROTTLE not supported: {e}")
+ 
+         if device == "NPU" and OpenVINOModelRunner.is_detection_model(model_type):
+-            try:
+-                self.ov_core.set_property(device, {"NPU_TURBO": "YES"})
+-            except Exception as e:
+-                logger.debug(f"NPU_TURBO not supported by driver: {e}")
++            # Turbo makes the NPU driver busy-wait on a CPU core through every
++            # inference; FRIGATE_NPU_TURBO=false gives up ~1-2 ms to free that core.
++            turbo = os.environ.get("FRIGATE_NPU_TURBO", "true").lower()
++            if turbo in ("false", "0", "no", "off"):
++                logger.info("NPU turbo disabled by FRIGATE_NPU_TURBO")
++            else:
++                try:
++                    self.ov_core.set_property(device, {"NPU_TURBO": "YES"})
++                except Exception as e:
++                    logger.debug(f"NPU_TURBO not supported by driver: {e}")
+ 
+         # Compile model under the shared lock
+         with _OPENVINO_LOCK:

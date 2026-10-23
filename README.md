@@ -4,9 +4,9 @@
 with an Intel stack new enough for Panther Lake (Intel Core Ultra series 3): the Xe3
 iGPU for VA-API decode and OpenVINO `GPU`, and the NPU50xx for OpenVINO `NPU`.
 
-Frigate itself is unchanged. Its Docker build is changed by three small patches in
-[`patches/`](patches), applied to a pinned upstream commit, so the whole difference
-from stock Frigate fits on a screen.
+Four small patches in [`patches/`](patches), applied to a pinned upstream commit,
+make up the whole difference from stock Frigate: three change its Docker build, and
+one lets you switch off NPU turbo (see [NPU turbo](#npu-turbo)).
 
 > This build stands on the work of [@timothystewart6](https://github.com/timothystewart6)
 > in [frigate-intel-npu](https://github.com/timothystewart6/frigate-intel-npu), which
@@ -106,6 +106,31 @@ The idle NPU draws a fraction of the ~0.6 W it uses while detecting.
 Even so, the first detection after minutes without motion takes 40–100 ms; the next
 ones are back to normal. On a quiet night Frigate's average climbs because of those
 single detections, and drops again as soon as anything moves.
+
+### NPU turbo
+
+Frigate asks the NPU driver for turbo mode on detectors. In turbo mode the driver
+does not sleep while the NPU works: it waits on a CPU core (UMONITOR/UMWAIT, up to
+15 ms) through every inference, so each detection costs a full core for its whole
+duration. Turbo does not make the NPU itself faster; it shortens the wake-up when
+the result is ready.
+
+YOLOv9-m 512, one inference every 0.2 s:
+
+| | Inference | CPU during inference |
+|---|---|---|
+| turbo (default) | 9.2 ms | 9.2 ms (100%) |
+| `FRIGATE_NPU_TURBO=false` | 11.4 ms | 1.6 ms (14%) |
+
+Turbo stays on by default, as upstream has it. For an always-on NVR, where a core
+per detection matters more than a millisecond or two, set:
+
+```yaml
+environment:
+  FRIGATE_NPU_TURBO: "false"
+```
+
+Frigate logs `NPU turbo disabled by FRIGATE_NPU_TURBO` when it is off.
 
 ## Models
 

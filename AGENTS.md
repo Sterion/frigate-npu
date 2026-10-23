@@ -8,7 +8,7 @@ source: the build clones upstream at a pinned commit and applies a patch series.
 | Path | |
 |---|---|
 | `upstream.env` | Frigate tag and the commit it must resolve to |
-| `patches/` | Changes to Frigate's Docker build, applied in order with `git am` |
+| `patches/` | Changes to Frigate, applied in order with `git am`: its Docker build, and the `FRIGATE_NPU_TURBO` switch |
 | `overlay/` | Files added to the tree as-is (`verify-frigate-intel`) |
 | `build.sh`, `build.ps1` | The same build for Linux and Windows |
 | `.github/workflows/` | `image.yml` builds, smoke-tests and pushes; `build.yml` and `release.yml` call it |
